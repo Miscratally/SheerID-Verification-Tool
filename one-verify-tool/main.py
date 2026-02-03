@@ -327,21 +327,23 @@ UNIVERSITIES = [
 
 
 def select_university() -> Dict:
-    """Weighted random selection based on success rates"""
+    """Weighted random selection prioritizing high-success US universities (weight >= 95)"""
+    # Prioritize high-success universities (weight >= 95)
+    high_priority = [u for u in UNIVERSITIES if u.get("weight", 0) >= 95]
+    
+    if not high_priority:
+        high_priority = UNIVERSITIES[:10]  # Fallback to top 10
+    
     weights = []
-    for uni in UNIVERSITIES:
-        weight = uni["weight"] * (stats.get_rate(uni["name"]) / 50)
-        weights.append(max(1, weight))
+    for uni in high_priority:
+        # Combine base weight with historical success rate
+        base_weight = uni.get("weight", 50)
+        success_rate = stats.get_rate(uni["name"])
+        adjusted_weight = base_weight * (success_rate / 50)
+        weights.append(max(1, adjusted_weight))
 
-    total = sum(weights)
-    r = random.uniform(0, total)
-
-    cumulative = 0
-    for uni, weight in zip(UNIVERSITIES, weights):
-        cumulative += weight
-        if r <= cumulative:
-            return {**uni, "idExtended": str(uni["id"])}
-    return {**UNIVERSITIES[0], "idExtended": str(UNIVERSITIES[0]["id"])}
+    selected = random.choices(high_priority, weights=weights, k=1)[0]
+    return {**selected, "idExtended": str(selected["id"])}
 
 
 # ============ UTILITIES ============
@@ -888,8 +890,9 @@ class GeminiVerifier:
                     "phoneNumber": "",
                     "organization": {
                         "id": self.org["id"],
-                        "idExtended": self.org["idExtended"],
+                        "idExtended": str(self.org["id"]),
                         "name": self.org["name"],
+                        "emailDomain": self.org.get("domain", ""),
                     },
                     "deviceFingerprintHash": self.fingerprint,
                     "locale": "en-US",
@@ -897,8 +900,15 @@ class GeminiVerifier:
                         "marketConsentValue": False,
                         "verificationId": self.vid,
                         "refererUrl": f"https://services.sheerid.com/verify/{PROGRAM_ID}/?verificationId={self.vid}",
-                        "flags": '{"collect-info-step-email-first":"default","doc-upload-considerations":"default","doc-upload-may24":"default","doc-upload-redesign-use-legacy-message-keys":false,"docUpload-assertion-checklist":"default","font-size":"default","include-cvec-field-france-student":"not-labeled-optional"}',
-                        "submissionOptIn": "By submitting the personal information above, I acknowledge that my personal information is being collected under the privacy policy of the business from which I am seeking a discount",
+                        "flags": json.dumps({
+                            "collect-info-step-email-first": "default",
+                            "doc-upload-considerations": "default",
+                            "doc-upload-may24": "default",
+                            "doc-upload-redesign-use-legacy-message-keys": False,
+                            "collect-info-step-redesign": "default",
+                            "instant-verification": "enabled"
+                        }),
+                        "submissionOptIn": "By submitting the personal information above, I acknowledge that my personal information is being collected under the privacy policy of the business from which I am claiming an offer and will be shared with SheerID for verification purposes in accordance with SheerID's privacy policy and terms of use. I also agree to SheerID's use of my information to verify my eligibility for this and other similar offers."
                     },
                 }
 
@@ -910,11 +920,23 @@ class GeminiVerifier:
 
                 if status != 200:
                     stats.record(self.org["name"], False)
-                    print(f"     ❗ Submit failed: HTTP {status}")
-                    print(f"     ❗ Response body: {data}")
+                    print(f"     ❗ 提交失败: HTTP {status}")
+                    print(f"     ❗ 错误详情: {data}")
+                    
+                    # Detailed error analysis
+                    error_ids = data.get("errorIds", [])
+                    if "invalidOrganization" in error_ids:
+                        print(f"     💡 提示: 学校 '{self.org['name']}' 可能不被接受")
+                        print(f"     💡 建议: 尝试其他高权重美国大学")
+                    elif "fraudRulesReject" in error_ids:
+                        print(f"     💡 提示: 触发反欺诈检测")
+                        print(f"     💡 建议: 检查代理类型 (需使用住宅IP)")
+                    
                     return {
                         "success": False,
-                        "error": f"Submit failed: {status} - {data}",
+                        "error": f"Submit failed: {status}",
+                        "errorIds": error_ids,
+                        "details": data
                     }
 
                 if data.get("currentStep") == "error":
@@ -1080,12 +1102,29 @@ def main():
         print("\n   ❌ Invalid URL. Must contain sheerid.com")
         return
 
-    # Show proxy info
+    # Show proxy info and warnings
     if args.proxy:
         print(f"   🔒 Using proxy: {args.proxy}")
     else:
-        print("   ⚠️  No proxy specified! Using direct connection.")
-        print("   ⚠️  This may result in verification failure.")
+        print("\n   " + "⚠" * 20)
+        print("   ⚠️  严重警告: 未使用代理!")
+        print("   ⚠️  ")
+        print("   ⚠️  Google One 验证要求:")
+        print("   ⚠️  1. 必须使用美国住宅代理 (Residential IP)")
+        print("   ⚠️  2. 数据中心代理将被 100% 拒绝")
+        print("   ⚠️  3. 非美国 IP 成功率接近 0%")
+        print("   ⚠️  ")
+        print("   ⚠️  推荐代理服务:")
+        print("   ⚠️  - Smartproxy (smartproxy.com)")
+        print("   ⚠️  - Bright Data (brightdata.com)")
+        print("   ⚠️  - Oxylabs (oxylabs.io)")
+        print("   " + "⚠" * 20)
+        
+        if not args.force:
+            confirm = input("\n   仍要继续? (y/N): ").strip().lower()
+            if confirm != "y":
+                print("\n   已取消。使用 --proxy 参数指定代理服务器。")
+                return
 
     print("\n   ⏳ Processing...")
 
